@@ -30,12 +30,20 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files (.env.example is a safe, no-secrets template and is intentionally committed)
 .env*
+!.env.example
 
 # vercel
 .vercel
 
+# local sqlite db (created by `npm run dev` via predev push)
+*.db
+*.db-journal
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local Netlify folder
+.netlify
