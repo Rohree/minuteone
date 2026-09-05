@@ -77,6 +77,8 @@ functions have an ephemeral filesystem — a local SQLite file wouldn't survive 
 
 **Live instance:** <https://minuteone-calle.netlify.app> (dry-run; two test leads from setup
 verification are visible on `/review` — harmless, safe to ignore or clear via the Turso dashboard).
+Continuously deployed from <https://github.com/Rohree/minuteone> (`master` branch) — a `git push`
+there triggers a new production build automatically, same as `netlify deploy --build --prod`.
 
 **Two non-obvious things this needed, in case the deploy ever breaks again:**
 
