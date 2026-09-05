@@ -7,6 +7,7 @@ import { loadBusinessConfig } from "@/lib/config/load";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { CancelButton } from "../cancel-button";
 import { statusVariant, outcomeVariant } from "../badge-variants";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +29,10 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 
       <div className="mt-4 mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">{lead.name}</h1>
-        <Badge variant={statusVariant(lead.status)}>{lead.status}</Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant={statusVariant(lead.status)}>{lead.status}</Badge>
+          {lead.status === "pending" && <CancelButton leadId={lead.id} />}
+        </div>
       </div>
 
       <Card className="mb-6">

@@ -2,27 +2,37 @@
 
 Instant lead-callback qualification agent, built on [CALL-E](https://github.com/CALLE-AI/call-e-integrations)
 for the "Your Code Is Calling" hackathon. When a prospect submits a lead form, MinuteOne calls
-them back, runs a config-driven qualification conversation, and returns a scored LeadCard.
+them back, runs a config-driven qualification conversation, and returns a scored LeadCard —
+turning "someone filled out a form" into "someone we already know is worth a callback" within
+about a minute, without a human ever having to place the first call.
 
-> **Status: work in progress.** This README doubles as a resume-here note — see
-> [Build status](#build-status) below for exactly what's done and what's left. It will be
-> rewritten into the final submission README (setup/side-effects/dry-run/credentials/
-> cancellation/consent, per the `awesome-phone-call-agents` contribution rules) once the real
-> CALL-E call path and the Netlify deploy are in.
+**Host / provider:** [CALL-E](https://github.com/CALLE-AI/call-e-integrations) is the only
+external calling provider this app talks to (via its MCP server — see
+[How it works](#how-it-works)). Everything else (database, hosting) is swappable infrastructure,
+not a "supported host" in the Agent Skills sense.
 
-## Quick start
+## Setup
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open <http://localhost:3000>. No external services or credentials are required — `predev`
-creates a local SQLite file (`local.db`) automatically, and the app runs in **dry-run mode by
-default** (no real phone calls are placed; see [Dry-run vs real calls](#dry-run-vs-real-calls)).
+Open <http://localhost:3000>. No external services, accounts, or credentials are required —
+`predev` creates a local SQLite file (`local.db`) automatically, and the app runs in **dry-run
+mode by default** (no real phone calls are placed; see [Dry-run vs real
+calls](#dry-run-vs-real-calls)).
 
-Submit a lead on the home page, then watch it move through `pending → in_progress → done` on
-[`/review`](http://localhost:3000/review) as the in-process worker dispatches it (polls every 5s).
+## Usage
+
+1. Submit a lead on the home page (name, E.164 phone, optional email/notes, and the required
+   consent checkbox).
+2. Watch it move through `pending → in_progress → done` on
+   [`/review`](http://localhost:3000/review) as the in-process worker dispatches it (polls every
+   5s). Click a row for the full LeadCard: outcome, score, per-question answers, call metadata.
+3. To try a different business/questions, edit `lib/config/business.example.json` (validated by
+   `lib/config/schema.ts`) — no code changes needed for a new opening line, 3–5 qualification
+   questions, scoring weights, or business-hours window.
 
 ## How it works
 
@@ -32,27 +42,44 @@ Lead form / webhook → leads table (SQLite/Turso) → worker (poller / Netlify 
   → outcome + rubric score mapped to a LeadCard → written back → shown in /review
 ```
 
-- **Config-driven**: `lib/config/business.example.json` (validated by `lib/config/schema.ts`)
-  defines the business identity/opening line, 3–5 qualification questions with scoring weights,
-  and the business-hours window. No hardcoded scripts.
+- **Config-driven**: `lib/config/business.example.json` defines the business identity/opening
+  line, qualification questions, scoring rubric, and the business-hours window. No hardcoded
+  call scripts.
 - **`CallProvider`** (`lib/call/provider.ts`): the interface CALL-E is plugged in behind.
   `lib/call/fake.ts` is the dry-run implementation (simulated delay, weighted-random outcomes,
-  synthetic answers). `lib/call/calle.ts` is the real provider — CALL-E turned out to have no
-  REST/SDK surface at all, only an OAuth-protected MCP server (`calle mcp config` shows
+  synthetic answers) and is the default everywhere. `lib/call/calle.ts` is the real provider —
+  CALL-E has no REST/SDK surface, only an OAuth-protected MCP server (`calle mcp config` shows
   `https://seleven-mcp-sg.airudder.com/mcp/openagent_oauth`), so it's an
   `@modelcontextprotocol/sdk` client driving `plan_call` → `run_call` → poll `get_call_run`.
   There's no structured-result-schema parameter on the real API, so `task-builder.ts` spells out
   the exact field keys to use in the goal text itself, and the real provider reads back whatever
   lands in `extracted` defensively (no schema enforcement upstream).
-- **`dispatchLead`** (`lib/worker/dispatch.ts`): the single shared dispatch core. Enforces
-  consent, gates on business hours, applies the retry policy (max 1 retry on no_answer/
-  voicemail, never on declined), scores answers against the config's rubric, and maps the result
-  onto the fixed LeadCard outcome enum (`qualified | not_qualified | callback_requested |
-  no_answer | wrong_number | declined`).
+- **`dispatchLead`** (`lib/worker/dispatch.ts`): the single shared dispatch core, called by both
+  the local poller and the Netlify scheduled function. Atomically claims a lead (an
+  `UPDATE ... WHERE status='pending'` in one statement, not a separate read-then-write) so two
+  overlapping worker ticks can never both dispatch the same lead, enforces consent, gates on
+  business hours, applies the retry policy (max 1 retry on no_answer/voicemail, never on
+  declined), scores answers against the config's rubric, and maps the result onto the fixed
+  LeadCard outcome enum (`qualified | not_qualified | callback_requested | no_answer |
+  wrong_number | declined`).
 - **Worker wiring**: locally, `instrumentation.ts` starts an in-process `setInterval` poller
-  (`lib/worker/poller.ts`) once per dev server instance. The Netlify deploy will use a scheduled
-  function instead (not built yet), since Netlify functions have no long-running process to host
-  a poller and an ephemeral filesystem SQLite can't survive on.
+  (`lib/worker/poller.ts`) once per dev server instance. The Netlify deploy uses a 1-minute
+  scheduled function instead (`netlify/functions/sweep-scheduled.ts`), since Netlify functions
+  have no long-running process to host a poller and an ephemeral filesystem SQLite can't survive
+  on — both call the same `lib/worker/sweep.ts`.
+
+## Side effects
+
+- **Placing a real phone call** — only when `DRY_RUN=false` and `CALLE_API_KEY` are both set (see
+  below). Every other operation (submitting a lead, viewing `/review`, editing the config) is
+  local/in-memory/database-only and has no external effect.
+- **A recurring background job**, disclosed, not hidden: locally, a `setInterval` poller runs
+  every 5 seconds for as long as the dev server process is alive. On the deployed instance, a
+  Netlify Scheduled Function (`netlify/functions/sweep-scheduled.ts`) runs every 1 minute for as
+  long as the site exists. Both only ever act on leads already sitting in the database with
+  `status = "pending"` — they never originate a lead or a call on their own initiative.
+- **Writes to a database** — `local.db` (a plain file in this directory) by default, or a hosted
+  Turso database when `TURSO_DATABASE_URL` is set (deployed instance only).
 
 ## Dry-run vs real calls
 
@@ -62,12 +89,77 @@ Dry-run (`FakeCallProvider`) is the default everywhere. Real calls require an ex
 DRY_RUN=false CALLE_API_KEY=... npm run dev
 ```
 
-`CALLE_API_KEY` is a bearer token, not a classic API key — see `.env.example` for how to get one
-via `calle auth login`. Only 20 real CALL-E calls are available for this whole project, so real
-calls are reserved for final verification and demo-video recording — not day-to-day iteration.
-**Note:** CALL-E rejects reserved test numbers (555-xxxx) at the planning stage ("calls to this
-region are not supported"), so real verification needs an actual phone number, not the masked
-examples used elsewhere in this repo.
+Only 20 real CALL-E calls are available for this whole project, so real calls are reserved for
+verification and demo-video recording — not day-to-day iteration. CALL-E only places calls to a
+specific set of supported countries (confirmed: US, UK, Canada, Australia, Singapore, Ireland —
+see [CALL-E's supported regions
+doc](https://github.com/CALLE-AI/call-e-integrations#supported-regions-and-languages) for the
+full list); it rejects unsupported numbers at the free planning step, before anything is dialed
+or spent. It also rejects reserved test numbers (555-xxxx) the same way, so real verification
+needs an actual phone number in a supported region, not the masked examples used elsewhere in
+this repo.
+
+## Credential handling
+
+- **No credentials at all are needed to run this app locally in its default mode.**
+- **`CALLE_API_KEY`** (only needed for real calls): CALL-E has no separate "API key" page — it's
+  a bearer token from its OAuth-protected MCP server. Get one by installing the CLI
+  (`npm install -g @call-e/cli`), running `calle auth login` (opens a browser to authorize), and
+  reading the `token.access_token` field from the cached token file the CLI prints the path to
+  (e.g. `~/.calle-mcp/cli/<hash>/token.json`). The token is long-lived (about 1000 days), so this
+  is a one-time setup step. Never commit it — `.env*` is gitignored (except `.env.example`,
+  which contains no real values).
+- **`TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`** (deployed instance only, never needed locally):
+  see [Netlify deployment](#netlify-deployment).
+- Nothing in this repo reads credentials from anywhere other than environment variables, and
+  nothing logs or displays a credential value anywhere in the app or its output.
+
+## Cancellation & rollback
+
+- **Cancel a specific lead before it's called:** every "pending" lead has a **Cancel** button on
+  `/review` and on its own detail page. This sets it to `failed` with a
+  "Cancelled by operator" summary and it will never be dispatched — implemented as the same
+  atomic conditional `UPDATE` pattern as dispatch's own claim, so a cancel can't race a worker
+  tick that's claiming the same lead at that instant. Once a lead reaches `in_progress` (a real
+  call is actually in flight), there is nothing to cancel: CALL-E's own `run_call` contract has
+  no abort/interrupt operation, and its guidance is explicit — "Do not call `run_call` more than
+  once... once started, wait for activity" — so MinuteOne doesn't attempt one either.
+- **Stop the recurring background job:** locally, stop the dev server process (`Ctrl+C`) — the
+  poller is in-process and stops with it, nothing else to unsubscribe from. On the deployed
+  instance, either delete the Netlify site, or remove/rename
+  `netlify/functions/sweep-scheduled.ts` and redeploy — Netlify has no separate CLI toggle for a
+  single scheduled function. Setting `DRY_RUN` back to unset/`true` stops it from placing *real*
+  calls immediately, but does not stop the sweep itself from running (it'll keep dispatching
+  through the fake provider).
+- **Rollback a bad business-config change:** `lib/config/business.example.json` is a plain file
+  under version control — `git checkout` or `git revert` it like any other file. There's no
+  server-side state tied to a specific config version.
+
+## Consent & safety
+
+- **Explicit user intent, enforced twice:** the lead form's consent checkbox must be checked to
+  submit at all (the intake schema requires `consent: true` literally — a request without it is
+  rejected with a 400 before a row is ever created), and `dispatchLead` independently refuses to
+  place a call for any lead without consent recorded, in case a row ever reached the database
+  some other way.
+- **E.164 phone numbers only** — validated by both the client-side input pattern and the
+  server-side Zod schema (`leadIntakeSchema`).
+- **Masked/example numbers everywhere in this repo** — `.env.example`, the lead-form placeholder,
+  and every test/demo number use the reserved `+1555…` range. The only real number ever used
+  during this build was the developer's own, for direct real-call verification, and it never
+  appears in the repo.
+- **No hidden recurring schedules** — see [Side effects](#side-effects); both the poller and the
+  scheduled function are documented here, not discovered by reading source.
+- **No duplicate jobs** — `dispatchLead`'s atomic claim (see [How it works](#how-it-works)) means
+  a lead can only ever be picked up by one worker tick, not dispatched twice by two overlapping
+  ones.
+- **Clear cancellation behavior** — see [Cancellation & rollback](#cancellation--rollback).
+- **No credential exposure** — see [Credential handling](#credential-handling).
+- **Content boundaries:** the demo business config (`business.example.json`) is a fictional home
+  services company asking about repair/installation/inspection requests. Nothing in this app
+  generates medical, legal, financial, or emergency-services content — a real deployment's
+  business config is the operator's own responsibility, same as the script a human sales rep
+  would follow.
 
 ## Netlify deployment
 
@@ -75,10 +167,9 @@ The submission itself only needs `npm i && npm run dev` (SQLite + in-process pol
 section is for the optional live demo instance, which needs a real database since Netlify
 functions have an ephemeral filesystem — a local SQLite file wouldn't survive between invocations.
 
-**Live instance:** <https://minuteone-calle.netlify.app> (dry-run; two test leads from setup
-verification are visible on `/review` — harmless, safe to ignore or clear via the Turso dashboard).
-Continuously deployed from <https://github.com/Rohree/minuteone> (`master` branch) — a `git push`
-there triggers a new production build automatically, same as `netlify deploy --build --prod`.
+**Live instance:** <https://minuteone-calle.netlify.app> (dry-run). Continuously deployed from
+<https://github.com/Rohree/minuteone> (`master` branch) — a `git push` there triggers a new
+production build automatically, same as `netlify deploy --build --prod`.
 
 **Two non-obvious things this needed, in case the deploy ever breaks again:**
 
@@ -124,56 +215,57 @@ there triggers a new production build automatically, same as `netlify deploy --b
    minute on `/review`. To place real calls there too, also set `DRY_RUN=false` +
    `CALLE_API_KEY` (see [Dry-run vs real calls](#dry-run-vs-real-calls)).
 
+## How this differs from similar apps in this repo
+
+None of the existing `apps/typescript/` entries implement this specific pattern — an inbound web
+lead calling the *business* back within about a minute, with config-driven qualification
+questions scored into a routing decision. The closest neighbors, and how MinuteOne differs:
+
+- **`ai-front-desk`** is a receptionist that keeps an appointment-business's calendar full across
+  three flows; MinuteOne is a single-purpose speed-to-lead qualifier with a scored outcome, not a
+  calendar system.
+- **`clinic-appointment-concierge`** calls in the opposite direction — on behalf of a patient,
+  outbound to a clinic — rather than a business calling back its own inbound lead.
+- **`evidence-grounded-callback`**, **`recallready`**, **`readyline`**, **`dispatch-pulse`**, and
+  **`verify-contact-claim`** each solve a narrow, differently-shaped problem (evidence-grounding
+  guardrails, product recalls, event vendor coordination, delivery verification, and scam-number
+  verification, respectively) — none are lead-qualification workflows.
+
 ## Build status
 
-Tracking the plan at `C:\Users\beast\.claude\plans\mutable-imagining-candle.md`.
+**Done and verified:**
 
-**Done, and verified end-to-end** (typecheck, lint, `next build`, and ~20 leads run through the
-real HTTP API and watched through the full dispatch pipeline):
+- Full local dry-run pipeline (lead form → intake → poller → dispatch → fake provider → scoring →
+  review console, including cancellation), typecheck, lint, and `next build` all pass.
+- Real `calle.ts` `CallProvider` — verified live against the CALL-E MCP server via `plan_call`
+  (free, doesn't place a call). `run_call` itself needs a phone number in a CALL-E-supported
+  region (see [Dry-run vs real calls](#dry-run-vs-real-calls)) — not yet exercised, reserved for
+  final verification.
+- Netlify deployment, live at <https://minuteone-calle.netlify.app>, continuously deployed from
+  GitHub — verified end-to-end: a lead submitted via the live API lands in Turso and the
+  scheduled function correctly picks it up and applies the business-hours gate.
 
-- [x] Next.js/TS/Tailwind/shadcn scaffold
-- [x] Drizzle + libSQL schema, auto-provisioned locally via `predev`
-- [x] Zod schemas: business config, lead intake, LeadCard
-- [x] `CallProvider` interface + `fake.ts` dry-run provider
-- [x] `dispatchLead` core: consent check, business-hours gate, rubric scoring, retry policy
-- [x] Local poller via `instrumentation.ts`
-- [x] Hosted lead form (`/`) + review console (`/review`, `/review/[id]`), auto-refreshing
-- [x] Real `calle.ts` `CallProvider` — MCP client (`@modelcontextprotocol/sdk`) driving
-      `plan_call` → `run_call` → poll `get_call_run`; wiring verified live against the CALL-E MCP
-      server via `plan_call` (free, doesn't place a call). `run_call` itself not yet exercised —
-      needs a real phone number, reserved for later verification (only 20 real calls available).
-- [x] Netlify deployment, live at <https://minuteone-calle.netlify.app>: Turso DB provisioned
-      and schema pushed, Netlify site linked, `netlify.toml` + `netlify/functions/
-      sweep-scheduled.ts` (1-min cron via `lib/worker/sweep.ts`, shared with the local poller)
-      deployed. Verified end-to-end live: lead submitted via the live API, landed in Turso, and
-      the scheduled function picked it up and correctly applied the business-hours gate. See
-      [Netlify deployment](#netlify-deployment) for the two non-obvious bugs this took to fix
-      (Turbopack vs. webpack build; `drizzle-orm/libsql`'s native-binary import on Netlify's
-      Linux function).
+**Left before submission:**
 
-**Not started yet:**
-
-- [ ] Final submission README (setup/side-effects/dry-run/credentials/cancellation/consent)
-- [ ] Differentiation pass against existing similar apps in `apps/typescript/` (
-      `clinic-appointment-concierge`, `evidence-grounded-callback`, `recallready`, `readyline`,
-      `dispatch-pulse`, `verify-contact-claim`)
-- [ ] `scripts/validate_repository.py` run against a clone before opening the PR
-- [ ] 3-minute demo video + PR to `CALLE-AI/awesome-phone-call-agents` + Devpost submission
+- Real `run_call` verification with a supported-region phone number.
+- `scripts/validate_repository.py` run against a clone before opening the PR.
+- 3-minute demo video + PR to `CALLE-AI/awesome-phone-call-agents` + Devpost submission.
 
 Deadline: **2026-09-14**.
 
 ## Project layout
 
-```
+```text
 app/
   page.tsx, lead-form.tsx      hosted lead form
   api/leads/route.ts           lead intake webhook (Zod-validated)
-  review/                      review console (list + LeadCard detail)
+  api/leads/[id]/cancel/       cancel-before-dispatch endpoint
+  review/                      review console (list + LeadCard detail, cancel action)
 lib/
   config/                      business config schema, example config, loader
   db/                          Drizzle schema + client (SQLite locally, Turso when deployed)
   lead/                        lead intake / LeadCard Zod schemas, rubric scoring
   call/                        CallProvider interface, fake.ts, calle.ts, task-builder.ts
-  worker/                      dispatchLead core, business-hours check, local poller
+  worker/                      dispatchLead core (atomic claim), business-hours check, poller
 instrumentation.ts              starts the local poller once per server instance
 ```

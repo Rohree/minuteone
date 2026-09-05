@@ -1,4 +1,4 @@
-type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
+type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
 
 export function statusVariant(status: string): BadgeVariant {
   switch (status) {
@@ -16,11 +16,11 @@ export function statusVariant(status: string): BadgeVariant {
 export function outcomeVariant(outcome: string): BadgeVariant {
   switch (outcome) {
     case "qualified":
-      return "default";
+      return "success";
     case "callback_requested":
       return "secondary";
     case "not_qualified":
-      return "outline";
+      return "warning";
     default:
       return "destructive"; // no_answer, wrong_number, declined
   }

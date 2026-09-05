@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client";
 import { leads } from "../db/schema";
 import { loadBusinessConfig } from "../config/load";
@@ -17,8 +17,17 @@ const MAX_RETRIES = 1;
  * Netlify scheduled function in the deployed instance — same logic either way.
  */
 export async function dispatchLead(leadId: string): Promise<void> {
-  const [lead] = await db.select().from(leads).where(eq(leads.id, leadId)).limit(1);
-  if (!lead || lead.status !== "pending") return;
+  // Atomically claim the lead: the UPDATE's WHERE clause re-checks status='pending' in the same
+  // statement as the write, so two overlapping ticks (local poller + a slow-running previous
+  // tick, or concurrent invocations) can't both claim and dispatch the same lead — only the one
+  // whose UPDATE actually matches a row proceeds. A separate SELECT-then-UPDATE would leave a
+  // race window where both readers see "pending" before either writes "in_progress".
+  const [lead] = await db
+    .update(leads)
+    .set({ status: "in_progress", updatedAt: new Date() })
+    .where(and(eq(leads.id, leadId), eq(leads.status, "pending")))
+    .returning();
+  if (!lead) return;
 
   if (!lead.consent) {
     await db
@@ -30,13 +39,10 @@ export async function dispatchLead(leadId: string): Promise<void> {
 
   const config = loadBusinessConfig();
   if (!isWithinBusinessHours(config.businessHours)) {
-    return; // stays "pending"; picked up again on the next poll/sweep tick
+    // Release the claim back to "pending" so the next poll/sweep tick can pick it up.
+    await db.update(leads).set({ status: "pending", updatedAt: new Date() }).where(eq(leads.id, leadId));
+    return;
   }
-
-  await db
-    .update(leads)
-    .set({ status: "in_progress", updatedAt: new Date() })
-    .where(eq(leads.id, leadId));
 
   const provider = getCallProvider();
   const { task, resultSchema } = buildCallTask(config, lead.name);
