@@ -1,6 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { CallConnectionStatus, CallProvider, CallResult, PlaceCallInput } from "./provider";
+import type { CallConnectionStatus, CallProvider, CallResult, JsonSchema, PlaceCallInput } from "./provider";
+import { extractStructuredAnswers } from "./extract";
+import { extractStructuredAnswersHeuristically } from "./extract-heuristic";
 
 /**
  * CALL-E has no REST/SDK surface for this — `calle mcp config` shows it's an OAuth-protected
@@ -9,8 +11,13 @@ import type { CallConnectionStatus, CallProvider, CallResult, PlaceCallInput } f
  */
 const MCP_SERVER_URL = "https://seleven-mcp-sg.airudder.com/mcp/openagent_oauth";
 
-/** Hard ceiling so one stuck call can't block the poller from processing the rest of its batch. */
-const MAX_POLL_MS = 3 * 60 * 1000;
+/**
+ * Hard ceiling so one stuck call can't block the poller from processing the rest of its batch.
+ * Real-call verification (2026-09-12) showed a completed qualification call alone took 140s;
+ * with CALL-E's pre-dial "PREPARING" phase on top, a 3-minute ceiling clipped a call that
+ * finished successfully seconds later, mis-logging it as a timeout/no_answer.
+ */
+const MAX_POLL_MS = 6 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const MAX_POLL_INTERVAL_MS = 5000;
 
@@ -68,9 +75,11 @@ interface CallRunOutput {
 
 /**
  * Real CALL-E provider: an MCP client wrapping plan_call -> run_call -> poll(get_call_run).
- * There's no `resultSchema` parameter on the real API (unlike this interface's shape, kept for
- * fake.ts's benefit) — the expected field keys are instead spelled out in the goal text itself
- * by task-builder.ts, and `extracted` is read back defensively (no schema enforcement).
+ * There's no `resultSchema` parameter on plan_call/run_call themselves — the expected field keys
+ * are spelled out in the goal text by task-builder.ts, but the real API has no way to honor that:
+ * `extracted` comes back as fixed platform bookkeeping, never the requested fields (confirmed via
+ * a real call on 2026-09-12 — see resolveStructuredResult below). So `resultSchema` is instead
+ * used here, post-call, to drive a second LLM extraction pass over the call's summary/transcript.
  */
 export class CalleCallProvider implements CallProvider {
   private client: Promise<Client> | null = null;
@@ -101,10 +110,14 @@ export class CalleCallProvider implements CallProvider {
       confirm_token: plan.confirm_token,
     });
 
-    return this.pollUntilDone(client, run.run_id);
+    return this.pollUntilDone(client, run.run_id, input.resultSchema);
   }
 
-  private async pollUntilDone(client: Client, runId: string): Promise<CallResult> {
+  private async pollUntilDone(
+    client: Client,
+    runId: string,
+    resultSchema: JsonSchema,
+  ): Promise<CallResult> {
     const deadline = Date.now() + MAX_POLL_MS;
     let cursor: string | undefined;
     let latest: CallRunOutput | null = null;
@@ -117,7 +130,7 @@ export class CalleCallProvider implements CallProvider {
       latest = run;
       cursor = run.next_cursor ?? cursor;
 
-      if (isTerminal(run)) return mapRunToCallResult(run);
+      if (isTerminal(run)) return mapRunToCallResult(run, resultSchema);
 
       const waitMs = run.next_step?.poll_after_seconds
         ? run.next_step.poll_after_seconds * 1000
@@ -168,7 +181,7 @@ function isTerminal(run: CallRunOutput): boolean {
   return TERMINAL_STATUSES.has(run.status);
 }
 
-function mapRunToCallResult(run: CallRunOutput): CallResult {
+async function mapRunToCallResult(run: CallRunOutput, resultSchema: JsonSchema): Promise<CallResult> {
   if (run.next_step && BLOCKED_ACTIONS.has(run.next_step.action)) {
     return {
       connectionStatus: "failed",
@@ -187,12 +200,51 @@ function mapRunToCallResult(run: CallRunOutput): CallResult {
 
   return {
     connectionStatus,
-    structuredResult: connectionStatus === "completed" ? (run.result?.extracted ?? {}) : null,
+    structuredResult:
+      connectionStatus === "completed" ? await resolveStructuredResult(run, resultSchema) : null,
     evidence,
     callId: run.result?.call_id ?? run.run_id,
     durationS: durationFromActivity(run.activity),
     transcriptRef: run.result?.transcript ?? undefined,
   };
+}
+
+/**
+ * CALL-E's real `extracted` is fixed platform bookkeeping (goal echo, region, call timing) —
+ * it never contains the business-specific fields task-builder.ts asks for, because the real API
+ * has no structured-output parameter. The actual answers only ever show up as prose in
+ * `summary`/`transcript`, so a completed call needs those turned back into the flat shape
+ * scoreAnswers()/mapResult() expect. Three-tier fallback, most to least accurate: an LLM pass
+ * (only attempted if ANTHROPIC_API_KEY is set — real money, real credits, not required to run
+ * this app), then a free local keyword/regex parser (extract-heuristic.ts — no external calls,
+ * more fragile on messy real speech), then CALL-E's raw (unhelpful but never absent) `extracted`
+ * so a successfully-completed call is never lost to an extraction-layer error.
+ */
+async function resolveStructuredResult(
+  run: CallRunOutput,
+  resultSchema: JsonSchema,
+): Promise<Record<string, unknown>> {
+  const callText = {
+    summary: run.result?.summary ?? run.result?.post_summary ?? run.message ?? "",
+    transcript: run.result?.transcript ?? null,
+  };
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      return await extractStructuredAnswers(resultSchema, callText);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`LLM extraction failed for run ${run.run_id}, falling back to heuristic: ${message}`);
+    }
+  }
+
+  try {
+    return extractStructuredAnswersHeuristically(resultSchema, callText);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Heuristic extraction failed for run ${run.run_id}: ${message}`);
+    return run.result?.extracted ?? {};
+  }
 }
 
 function mapStatus(status: string): CallConnectionStatus {

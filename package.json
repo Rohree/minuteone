@@ -13,6 +13,7 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
     "@base-ui/react": "^1.8.0",
     "@libsql/client": "^0.18.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
