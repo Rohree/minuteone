@@ -6,6 +6,12 @@ them back, runs a config-driven qualification conversation, and returns a scored
 turning "someone filled out a form" into "someone we already know is worth a callback" within
 about a minute, without a human ever having to place the first call.
 
+MinuteOne is self-serve, Calendly-style: sign up, describe your business and the questions you
+want asked, and you get your own embeddable lead-capture form
+(`<iframe src=".../f/your-slug">`) plus a dashboard that shows only your own leads. No account is
+required to try the core flow, though — the hosted demo on the home page and `/review` work
+exactly as a single-tenant demo always did, backed by a seeded "default" business.
+
 **Host / provider:** [CALL-E](https://github.com/CALLE-AI/call-e-integrations) is the only
 external calling provider this app talks to (via its MCP server — see
 [How it works](#how-it-works)). Everything else (database, hosting) is swappable infrastructure,
@@ -25,26 +31,53 @@ calls](#dry-run-vs-real-calls)).
 
 ## Usage
 
+**No account, quickest path (single shared demo tenant):**
+
 1. Submit a lead on the home page (name, E.164 phone, optional email/notes, and the required
    consent checkbox).
 2. Watch it move through `pending → in_progress → done` on
    [`/review`](http://localhost:3000/review) as the in-process worker dispatches it (polls every
    5s). Click a row for the full LeadCard: outcome, score, per-question answers, call metadata.
-3. To try a different business/questions, edit `lib/config/business.example.json` (validated by
-   `lib/config/schema.ts`) — no code changes needed for a new opening line, 3–5 qualification
-   questions, scoring weights, or business-hours window.
+
+**With an account (your own business, your own embeddable form):**
+
+1. [Sign up](http://localhost:3000/signup) with an email, password, and business name — this
+   creates your own `businesses` row (seeded from the same example config below) and signs you
+   in.
+2. On [`/dashboard/settings`](http://localhost:3000/dashboard/settings), edit your opening line,
+   3–5 qualification questions, scoring weights, and business-hours window — validated by
+   `lib/config/schema.ts`'s `businessConfigSchema`, same schema as the file-based config below.
+3. On [`/dashboard/embed`](http://localhost:3000/dashboard/embed), copy your shareable link or
+   `<iframe>` snippet and drop it on your own site.
+4. Leads submitted through your form show up only on
+   [`/dashboard/leads`](http://localhost:3000/dashboard/leads) — scoped to your account, not the
+   global `/review` list.
+
+To change the seeded example config every new account starts from, edit
+`lib/config/business.example.json` (validated by `lib/config/schema.ts`) — no code changes needed
+for a new default opening line, questions, scoring weights, or business-hours window.
 
 ## How it works
 
 ```
-Lead form / webhook → leads table (SQLite/Turso) → worker (poller / Netlify scheduled fn)
-  → dispatchLead(): consent + business-hours check → CallProvider.placeCall()
-  → outcome + rubric score mapped to a LeadCard → written back → shown in /review
+Lead form / embeddable form → leads table (SQLite/Turso) → worker (poller / Netlify scheduled fn)
+  → dispatchLead(): consent + business-hours check → resolve the lead's own tenant config
+  → CallProvider.placeCall() → outcome + rubric score mapped to a LeadCard
+  → written back → shown in /review (global) or /dashboard/leads (scoped)
 ```
 
-- **Config-driven**: `lib/config/business.example.json` defines the business identity/opening
-  line, qualification questions, scoring rubric, and the business-hours window. No hardcoded
-  call scripts.
+- **Config-driven, per tenant**: each business's identity/opening line, qualification questions,
+  scoring rubric, and business-hours window live as one JSON blob on its own `businesses` row
+  (`lib/db/schema.ts`), validated by `lib/config/schema.ts`'s `businessConfigSchema` on every
+  read/write. `lib/config/load.ts` resolves a config by business id or slug — no hardcoded call
+  scripts, and no global config shared across tenants. A seeded "default" business
+  (`lib/db/seed.ts`) keeps the original single-tenant demo (`/`, `/review`) working unchanged.
+- **Accounts**: hand-rolled — `users`/`sessions` tables, `crypto.scrypt` password hashing,
+  httpOnly session cookie (`lib/auth/`). No third-party auth service and no new native dependency
+  (relevant given the native-binary bundling history documented below).
+- **Embeddable form**: `/f/[slug]` resolves a business by its public slug and renders the same
+  generic intake form as the home page, posting to the same `/api/leads` endpoint with the
+  business slug included — one intake contract for every tenant and the legacy demo alike.
 - **`CallProvider`** (`lib/call/provider.ts`): the interface CALL-E is plugged in behind.
   `lib/call/fake.ts` is the dry-run implementation (simulated delay, weighted-random outcomes,
   synthetic answers) and is the default everywhere. `lib/call/calle.ts` is the real provider —
@@ -79,7 +112,9 @@ Lead form / webhook → leads table (SQLite/Turso) → worker (poller / Netlify 
   long as the site exists. Both only ever act on leads already sitting in the database with
   `status = "pending"` — they never originate a lead or a call on their own initiative.
 - **Writes to a database** — `local.db` (a plain file in this directory) by default, or a hosted
-  Turso database when `TURSO_DATABASE_URL` is set (deployed instance only).
+  Turso database when `TURSO_DATABASE_URL` is set (deployed instance only). Signing up creates a
+  `users` row, a `sessions` row, and a `businesses` row — no other side effect; no email is sent,
+  no external service is called.
 
 ## Dry-run vs real calls
 
@@ -101,7 +136,9 @@ this repo.
 
 ## Credential handling
 
-- **No credentials at all are needed to run this app locally in its default mode.**
+- **No credentials at all are needed to run this app locally in its default mode.** Accounts use
+  hand-rolled sessions (`lib/auth/`), not a third-party auth provider — no new API key to obtain,
+  no new credential to configure, in local dev or deployed.
 - **`CALLE_API_KEY`** (only needed for real calls): CALL-E has no separate "API key" page — it's
   a bearer token from its OAuth-protected MCP server. Get one by installing the CLI
   (`npm install -g @call-e/cli`), running `calle auth login` (opens a browser to authorize), and
@@ -153,6 +190,11 @@ this repo.
 - **No duplicate jobs** — `dispatchLead`'s atomic claim (see [How it works](#how-it-works)) means
   a lead can only ever be picked up by one worker tick, not dispatched twice by two overlapping
   ones.
+- **Tenant isolation, enforced at the query, not just the page** — `/dashboard/leads` and its
+  detail page filter by the caller's own `businessId` in the `WHERE` clause itself; requesting
+  another tenant's lead by id 404s rather than leaking whether it exists. The business-settings
+  update endpoint (`/api/dashboard/business`) scopes its `UPDATE` by `ownerUserId`, not just an
+  auth check earlier in the request.
 - **Clear cancellation behavior** — see [Cancellation & rollback](#cancellation--rollback).
 - **No credential exposure** — see [Credential handling](#credential-handling).
 - **Content boundaries:** the demo business config (`business.example.json`) is a fictional home
@@ -193,11 +235,16 @@ production build automatically, same as `netlify deploy --build --prod`.
 1. **Provision a Turso database** (same SQLite dialect as local dev — one Drizzle schema serves
    both). Via the [Turso dashboard](https://turso.tech) or CLI, create a database and grab its
    `libsql://...` URL and an auth token.
-2. **Push the schema to it once:**
+2. **Push the schema to it once, then seed the default tenant:**
 
    ```bash
    TURSO_DATABASE_URL=libsql://... TURSO_AUTH_TOKEN=... npm run db:push
+   TURSO_DATABASE_URL=libsql://... TURSO_AUTH_TOKEN=... npm run db:seed
    ```
+
+   `db:seed` (`lib/db/seed.ts`) is idempotent — it creates the "default" business `/` and
+   `/review` fall back to, and backfills `businessId` onto any pre-existing lead row. Safe to
+   re-run any time, including against a database that already has real submitted leads.
 
 3. **Link a Netlify site** (`netlify login`, then `netlify init` or `netlify link` from this
    directory) and set its env vars — either in the Netlify UI or:
@@ -219,7 +266,8 @@ production build automatically, same as `netlify deploy --build --prod`.
 
 None of the existing `apps/typescript/` entries implement this specific pattern — an inbound web
 lead calling the *business* back within about a minute, with config-driven qualification
-questions scored into a routing decision. The closest neighbors, and how MinuteOne differs:
+questions scored into a routing decision, self-serve for any business that signs up (not a
+single hardcoded script). The closest neighbors, and how MinuteOne differs:
 
 - **`ai-front-desk`** is a receptionist that keeps an appointment-business's calendar full across
   three flows; MinuteOne is a single-purpose speed-to-lead qualifier with a scored outcome, not a
@@ -237,18 +285,28 @@ questions scored into a routing decision. The closest neighbors, and how MinuteO
 
 - Full local dry-run pipeline (lead form → intake → poller → dispatch → fake provider → scoring →
   review console, including cancellation), typecheck, lint, and `next build` all pass.
-- Real `calle.ts` `CallProvider` — verified live against the CALL-E MCP server via `plan_call`
-  (free, doesn't place a call). `run_call` itself needs a phone number in a CALL-E-supported
-  region (see [Dry-run vs real calls](#dry-run-vs-real-calls)) — not yet exercised, reserved for
-  final verification.
+- Real `calle.ts` `CallProvider` verified against a real CALL-E call end-to-end: `plan_call` →
+  `run_call` → polling → a completed ~2.5-minute qualification conversation. That real call
+  surfaced two bugs, both fixed and re-verified: the poll ceiling was too short for a real
+  conversation (`MAX_POLL_MS` 3min → 6min), and CALL-E's real API never returns structured
+  answers (only prose in `summary`/`transcript`) — `lib/call/extract.ts` (LLM pass, only used if
+  `ANTHROPIC_API_KEY` is set) and `lib/call/extract-heuristic.ts` (free local regex/keyword
+  fallback, always available) now recover the qualification answers either way.
 - Netlify deployment, live at <https://minuteone-calle.netlify.app>, continuously deployed from
   GitHub — verified end-to-end: a lead submitted via the live API lands in Turso and the
   scheduled function correctly picks it up and applies the business-hours gate.
+- `scripts/validate_repository.py` run against a full clone of `awesome-phone-call-agents` with
+  this app in place — passes.
+- **Multi-tenant SaaS layer** (accounts, per-business config, embeddable forms, scoped dashboard —
+  see [Usage](#usage) and [How it works](#how-it-works)): verified end-to-end with two real
+  signed-up tenants running deliberately different questions — dispatch resolved each lead
+  against its own tenant's config with no cross-tenant bleed, `/dashboard/leads` correctly scoped
+  per account, and an IDOR check (requesting another tenant's lead by id) 404ed as expected. The
+  original single-tenant demo (`/`, `/review`) is unchanged and unauthenticated, backed by a
+  seeded default tenant.
 
 **Left before submission:**
 
-- Real `run_call` verification with a supported-region phone number.
-- `scripts/validate_repository.py` run against a clone before opening the PR.
 - 3-minute demo video + PR to `CALLE-AI/awesome-phone-call-agents` + Devpost submission.
 
 Deadline: **2026-09-14**.
@@ -257,15 +315,24 @@ Deadline: **2026-09-14**.
 
 ```text
 app/
-  page.tsx, lead-form.tsx      hosted lead form
-  api/leads/route.ts           lead intake webhook (Zod-validated)
+  page.tsx, lead-form.tsx      hosted demo lead form (default tenant)
+  f/[slug]/                    embeddable public lead form, one per business
+  login/, signup/              auth pages
+  dashboard/                   authenticated: settings, leads (scoped), embed snippet
+  api/leads/route.ts           lead intake webhook (Zod-validated, resolves business by slug)
   api/leads/[id]/cancel/       cancel-before-dispatch endpoint
-  review/                      review console (list + LeadCard detail, cancel action)
+  api/auth/                    signup / login / logout route handlers
+  api/dashboard/business/      business-config update endpoint (ownership-scoped)
+  review/                      global review console (list + LeadCard detail, cancel action)
+components/
+  leads/                       shared lead-table/stats/detail — used by /review and /dashboard/leads
 lib/
-  config/                      business config schema, example config, loader
-  db/                          Drizzle schema + client (SQLite locally, Turso when deployed)
+  auth/                        password hashing (crypto.scrypt), sessions, current-user helpers
+  config/                      business config schema, example config, DB-backed loader, slugs
+  db/                          Drizzle schema + client (SQLite locally, Turso when deployed), seed
   lead/                        lead intake / LeadCard Zod schemas, rubric scoring
-  call/                        CallProvider interface, fake.ts, calle.ts, task-builder.ts
-  worker/                      dispatchLead core (atomic claim), business-hours check, poller
+  call/                        CallProvider interface, fake.ts, calle.ts, task-builder.ts,
+                                extract.ts (LLM) / extract-heuristic.ts (free fallback)
+  worker/                      dispatchLead core (atomic claim, per-tenant config), poller
 instrumentation.ts              starts the local poller once per server instance
 ```
