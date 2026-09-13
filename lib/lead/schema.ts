@@ -15,6 +15,12 @@ export const leadIntakeSchema = z.object({
   consent: z.literal(true, {
     error: "Consent to be called back is required",
   }),
+  /**
+   * Business slug this lead is for. Defaulted (not required) so any existing caller — including
+   * an external form/CRM webhook that predates multi-tenancy — that omits it still resolves to
+   * the seeded "default" tenant, unchanged from single-tenant behavior.
+   */
+  business: z.string().min(1).max(100).default("default"),
 });
 
 export type LeadIntake = z.infer<typeof leadIntakeSchema>;

@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/client";
 import { leads } from "../db/schema";
-import { loadBusinessConfig } from "../config/load";
+import { loadBusinessConfigForLead } from "../config/load";
 import type { BusinessConfig } from "../config/schema";
 import { buildCallTask } from "../call/task-builder";
 import { getCallProvider } from "../call";
@@ -37,7 +37,8 @@ export async function dispatchLead(leadId: string): Promise<void> {
     return;
   }
 
-  const config = loadBusinessConfig();
+  // Falls back to the seeded "default" tenant for any legacy lead that predates businessId.
+  const { config } = await loadBusinessConfigForLead(lead.businessId);
   if (!isWithinBusinessHours(config.businessHours)) {
     // Release the claim back to "pending" so the next poll/sweep tick can pick it up.
     await db.update(leads).set({ status: "pending", updatedAt: new Date() }).where(eq(leads.id, leadId));

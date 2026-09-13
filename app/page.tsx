@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { LeadForm } from "./lead-form";
-import { loadBusinessConfig } from "@/lib/config/load";
+import { loadBusinessConfigBySlug, DEFAULT_BUSINESS_SLUG } from "@/lib/config/load";
 
-export default function Home() {
-  const config = loadBusinessConfig();
+export default async function Home() {
+  const resolved = await loadBusinessConfigBySlug(DEFAULT_BUSINESS_SLUG);
+  if (!resolved) throw new Error("Default business is not seeded — run `npm run db:seed`.");
+  const { config } = resolved;
 
   return (
     <div className="flex min-h-screen flex-col items-center bg-zinc-50 px-6 py-16 dark:bg-black">
@@ -16,7 +18,7 @@ export default function Home() {
             no real call is placed).
           </p>
         </div>
-        <LeadForm />
+        <LeadForm businessSlug={DEFAULT_BUSINESS_SLUG} />
         <p className="mt-6 text-center text-sm text-muted-foreground">
           <Link href="/review" className="underline underline-offset-2">
             Open the review console

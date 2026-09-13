@@ -11,7 +11,12 @@ import { Textarea } from "@/components/ui/textarea";
 
 type SubmitState = "idle" | "submitting" | "success" | "error";
 
-export function LeadForm() {
+interface LeadFormProps {
+  /** Which business this lead is for — resolved server-side against businesses.slug. */
+  businessSlug: string;
+}
+
+export function LeadForm({ businessSlug }: LeadFormProps) {
   const [state, setState] = useState<SubmitState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [consent, setConsent] = useState(false);
@@ -28,6 +33,7 @@ export function LeadForm() {
       email: String(formData.get("email") ?? "") || undefined,
       notes: String(formData.get("notes") ?? "") || undefined,
       consent,
+      business: businessSlug,
     };
 
     setState("submitting");

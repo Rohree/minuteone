@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db/client";
 import { leads } from "@/lib/db/schema";
 import { leadIntakeSchema } from "@/lib/lead/schema";
+import { loadBusinessConfigBySlug } from "@/lib/config/load";
 
 /**
- * Lead intake webhook. The hosted demo form (app/page.tsx) posts here, and this is the same
- * shape an external form/CRM webhook would send. Consent is enforced at this boundary — no
- * consent, no row, no call, ever.
+ * Lead intake webhook. Every hosted form (app/page.tsx, app/f/[slug]/page.tsx) posts here, and
+ * this is the same shape an external form/CRM webhook would send. Consent is enforced at this
+ * boundary — no consent, no row, no call, ever.
  */
 export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
@@ -19,6 +20,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
+  const business = await loadBusinessConfigBySlug(parsed.data.business);
+  if (!business) {
+    return NextResponse.json({ error: { business: ["Unknown business"] } }, { status: 400 });
+  }
+
   const id = crypto.randomUUID();
   await db.insert(leads).values({
     id,
@@ -28,6 +34,7 @@ export async function POST(request: Request) {
     notes: parsed.data.notes,
     source: parsed.data.source,
     consent: parsed.data.consent,
+    businessId: business.id,
   });
 
   return NextResponse.json({ id, status: "pending" }, { status: 201 });
