@@ -1,38 +1,45 @@
 import { eq } from "drizzle-orm";
 import { db } from "../db/client";
-import { businesses } from "../db/schema";
+import { businessConfig } from "../db/schema";
 import { businessConfigSchema, type BusinessConfig } from "./schema";
+import exampleConfig from "./business.example.json";
 
-/** The seeded single-tenant business every pre-existing lead/route falls back to. See lib/db/seed.ts. */
-export const DEFAULT_BUSINESS_SLUG = "default";
-
-/** Throws if the id doesn't resolve — callers that can't guarantee it exists should check first. */
-export async function loadBusinessConfig(businessId: string): Promise<BusinessConfig> {
-  const [row] = await db.select().from(businesses).where(eq(businesses.id, businessId)).limit(1);
-  if (!row) throw new Error(`Unknown business: ${businessId}`);
-  return businessConfigSchema.parse(row.config);
-}
-
-export async function loadBusinessConfigBySlug(
-  slug: string,
-): Promise<{ id: string; config: BusinessConfig } | null> {
-  const [row] = await db.select().from(businesses).where(eq(businesses.slug, slug)).limit(1);
-  if (!row) return null;
-  return { id: row.id, config: businessConfigSchema.parse(row.config) };
-}
+/** Single-tenant: exactly one config row, this fixed id. */
+const SINGLETON_ID = "singleton";
 
 /**
- * Resolves a lead's own business config, falling back to the seeded default tenant for any
- * legacy row that predates the businessId column (see lib/db/schema.ts's businessId comment).
+ * Always-open default hours for the lazily-seeded config, so a fresh setup can be live-tested
+ * immediately via /setup instead of silently hanging on the business-hours gate. The bundled
+ * business.example.json still ships its own realistic Mon-Fri 9-18 window as reference content —
+ * this override only applies to the first-ever seed written to the DB.
  */
-export async function loadBusinessConfigForLead(
-  businessId: string | null,
-): Promise<{ id: string; config: BusinessConfig }> {
-  if (businessId) {
-    const config = await loadBusinessConfig(businessId);
-    return { id: businessId, config };
-  }
-  const fallback = await loadBusinessConfigBySlug(DEFAULT_BUSINESS_SLUG);
-  if (!fallback) throw new Error("Default business is not seeded — run `npm run db:seed`.");
-  return fallback;
+const ALWAYS_OPEN_HOURS = {
+  timezone: "America/New_York",
+  days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const,
+  start: "00:00",
+  end: "23:59",
+};
+
+/** Reads the single business config, lazily seeding it from business.example.json on first call. */
+export async function loadBusinessConfig(): Promise<BusinessConfig> {
+  const [row] = await db.select().from(businessConfig).where(eq(businessConfig.id, SINGLETON_ID)).limit(1);
+  if (row) return businessConfigSchema.parse(row.config);
+
+  const seeded = businessConfigSchema.parse({
+    ...businessConfigSchema.parse(exampleConfig),
+    businessHours: ALWAYS_OPEN_HOURS,
+  });
+  await db.insert(businessConfig).values({ id: SINGLETON_ID, config: seeded });
+  return seeded;
+}
+
+export async function saveBusinessConfig(config: BusinessConfig): Promise<void> {
+  const validated = businessConfigSchema.parse(config);
+  await db
+    .insert(businessConfig)
+    .values({ id: SINGLETON_ID, config: validated })
+    .onConflictDoUpdate({
+      target: businessConfig.id,
+      set: { config: validated, updatedAt: new Date() },
+    });
 }
