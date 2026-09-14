@@ -21,7 +21,7 @@ export default async function ReviewPage() {
             Leads move pending → in_progress → done as the worker dispatches calls.
           </p>
         </div>
-        <Link href="/" className="text-sm underline underline-offset-2">
+        <Link href="/" className="text-sm text-primary underline underline-offset-2">
           ← Back to lead form
         </Link>
       </div>

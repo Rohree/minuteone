@@ -102,7 +102,7 @@ export function SetupWizard({ initialConfig }: { initialConfig: BusinessConfig }
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <LeadForm />
-            <Link href="/review" className="text-center text-sm underline underline-offset-2">
+            <Link href="/review" className="text-center text-sm text-primary underline underline-offset-2">
               Watch it dispatch in the review console
             </Link>
           </CardContent>

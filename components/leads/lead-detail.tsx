@@ -18,7 +18,7 @@ interface LeadDetailProps {
 export function LeadDetail({ lead, backHref, backLabel, questionPrompt }: LeadDetailProps) {
   return (
     <div className="mx-auto max-w-2xl px-6 py-12">
-      <Link href={backHref} className="text-sm underline underline-offset-2">
+      <Link href={backHref} className="text-sm text-primary underline underline-offset-2">
         ← {backLabel}
       </Link>
 

@@ -7,7 +7,7 @@ export default async function SetupPage() {
   const config = await loadBusinessConfig();
 
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] flex-col items-center bg-zinc-50 px-6 py-16 dark:bg-black">
+    <div className="flex min-h-[calc(100vh-4rem)] flex-col items-center bg-background px-6 py-16">
       <div className="w-full max-w-2xl">
         <SetupWizard initialConfig={config} />
       </div>

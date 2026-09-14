@@ -6,7 +6,7 @@ export default async function Home() {
   const config = await loadBusinessConfig();
 
   return (
-    <div className="flex min-h-screen flex-col items-center bg-zinc-50 px-6 py-16 dark:bg-black">
+    <div className="flex min-h-screen flex-col items-center bg-background px-6 py-16">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <p className="text-sm font-medium text-muted-foreground">{config.business.name}</p>
@@ -18,11 +18,11 @@ export default async function Home() {
         </div>
         <LeadForm />
         <p className="mt-6 text-center text-sm text-muted-foreground">
-          <Link href="/review" className="underline underline-offset-2">
+          <Link href="/review" className="text-primary underline underline-offset-2">
             Open the review console
           </Link>
           {" · "}
-          <Link href="/setup" className="underline underline-offset-2">
+          <Link href="/setup" className="text-primary underline underline-offset-2">
             Configure this business
           </Link>
         </p>

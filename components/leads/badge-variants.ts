@@ -2,9 +2,12 @@ type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "succe
 
 export function statusVariant(status: string): BadgeVariant {
   switch (status) {
-    case "done":
-      return "default";
+    // "default" is the brand red now — in_progress ("live right now") owns it; done settles into
+    // black (secondary) instead, so it doesn't visually compete with in_progress or a declined/
+    // destructive-red outcome badge on the same row.
     case "in_progress":
+      return "default";
+    case "done":
       return "secondary";
     case "failed":
       return "destructive";

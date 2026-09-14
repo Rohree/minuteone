@@ -57,7 +57,7 @@ export function LeadForm() {
           <CardDescription>
             A qualification call will be placed as soon as it&apos;s within business hours. You
             can watch it show up in the{" "}
-            <Link href="/review" className="underline underline-offset-2">
+            <Link href="/review" className="text-primary underline underline-offset-2">
               review console
             </Link>
             .
